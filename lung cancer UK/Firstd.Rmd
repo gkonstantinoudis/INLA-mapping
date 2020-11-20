@@ -1,0 +1,233 @@
+---
+title: "Fitting BYM models"
+author: "GK"
+date: "14/10/2018"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(maptools)
+library(spdep)
+library(INLA)
+```
+
+## Lung Cancer in England
+
+The dataset lung contains information on lung cancer cases per intermidiate geography in England. First we will load the object. Do not forget to set working directory.
+
+```{r }
+# setwd("G:/Back up 03.04.2018/PhD/lectures/181030_INLA_ZH/lung cancer UK/")
+load("lung.RData")
+class(lung)
+```
+Please note that the lung object is a SpatialPolygonDataFrame, which is basically a shapefile, containing additional information per polygon. In our case the dataset includes some information about the geographical units (or intermediate geographies or IG) in England as for example the name of the region, the code etc. It also includes the number of cases diagnosed with lung cancer per IG in 2007, the type of cancer, a deprivation index, the expected number of cases in the corresponding IG and the logarithm of this expected number of cases. 
+
+We can easily plot the IGs in England by typing:
+
+```{r}
+plot(lung, main = "Intermediate Geographies in the UK")
+```
+
+Using @ on the SpatialPolygonsDataFrame object we have direct access to the data. For example
+
+```{r }
+head(lung@data)
+```
+We can also plot maps containing the information of the SpatialPolygonsDataFrame using the function spplot
+
+```{r }
+spplot(lung, "cases", col = "transparent", main = "Lung cancer cases")
+```
+
+What does this map tell us? How interesting is this map from the epidemiological perspective? What shall we do?
+
+```{r }
+lung$SIR <- lung$cases/lung$expected
+spplot(lung, "SIR", col = "transparent", main = "SIR")
+```
+
+Often the SIR or SMR is not the best estimator you can get because of its large variance. That means that we can often see extremes when the denominator is small. To mitigate this, in the bayesian setting we smooth the estimators with a combination of local and global smoothing (through conditional autoregressive priors or CAR). The most popular one is the Besag-York-Molli{\'e} prior. In the next junk we will run 2 different models,  one with an overdispersion parameter and one with a BYM prior. The general formulation of this model is given in the lecture slides, here we considered a nice reparametrisation given by Simpson et al 2018. This reparametrisation overcomes issues as scaling and identifiability issues the common BYM confronts. The mathematical formula is given bellow. Supposed $Y_i\sim\text{Poisson}(\lambda_iE_i)$, where $Y_i$ is the number of cases, $E_i$ the expected number of cases and $\lambda_i$ the SIR of the $i$-th IG. Then:
+
+$$\text{log}Y_i = \beta_0 + \pmb{\beta}\mathbf{X} + \frac{1}{\sqrt{\tau}}(\sqrt{1-\phi}v_i + \sqrt{\phi}u_i^*)$$
+where $v_i \sim \mathcal{N}(0, 1)$ and $u_i^*$ is a standardized spatially structured component with characteristic marginal variance equal to 1. The hyperparameter $\phi$ stands for the mixing parameter and it shows the percentage of variability explained by each random effect, with values close to 0 implying that the majority of the observed variation comes from the unstructured component, whereas values close to 1 the opposite. The hyperparameter $\tau$^is the random precision (1/variance). To complete the Bayesian representation we assign penalised complexity priors to the hyperparameters (Simpson et al. 2018). 
+
+# Disease Mapping of lung cancer
+
+First we will fit models without covariates, applying some level of smoothing on the SIRs. Lets begin by including just an overdispersion parameter, ie:
+
+$$\text{log}Y_i = \beta_0 + v_i$$
+The code needed to do so is:
+
+```{r }
+lung$ID <- 1:nrow(lung)
+formula_iid <- cases ~ 1 + offset(logExpected) + 
+               f(ID, model="iid", constr = TRUE, hyper = list(theta = list("PCprior", c(1, 0.01))))
+
+lung_mod_ov <- inla(formula_iid, data = lung@data, family = "poisson", 
+                    control.compute = list(dic=T, waic=T), verbose = F)
+summary(lung_mod_ov)
+
+# we can plot the overdispersion parameter
+
+lung$ov <- lung_mod_ov$summary.random$ID$`0.5quant`
+spplot(lung, "ov", col = "transparent", main = "overdispersion")
+```
+
+we can get prior posterior plots as:
+```{r }
+tmp_1 <- inla.tmarginal(function(x) exp(-1/2*x), marginal = lung_mod_ov$internal.marginals.hyperpar$`Log precision for ID`) 
+# make it sd
+tmp_2 <- inla.tmarginal(function(x) exp(-1/2*x),
+                        data.frame(x= seq(from = 1, to = 1000, length.out = 1000), 
+                                   y = inla.pc.dprec(seq(from = 1, to = 1000, length.out = 1000), 1, 0.01))
+)
+
+plot(tmp_1, type = "l",  main = "Prior-posterior", xlab = expression(sigma), xlim = c(0, .3))
+lines(tmp_2, lty=1, lwd=1, col = "blue")
+grid()
+legend("topleft", lty = 1, legend = c("prior", "posterior"), col = c("blue", "black"))
+```
+
+This plot is quite nice, telling us that there is some overdispersion in the data that we need to adjust for. Now I will add the spatially structured random effect using the Simpson parameterisation explained above. To fit this model in inla you need to specify model = "bym2", however is still posible to fit the model we described during the morning lecture by specifying model = "bym" instead. However you need to be careful when interpretating the bym version.
+```{r  message=FALSE, warning=FALSE}
+# prepare data for BYM, ie need to create an adjacency matrix
+W.nb <- poly2nb(lung)
+nb2INLA("W.adj", W.nb) 
+
+formula_bym <- cases ~ 1 + offset(logExpected) + 
+               f(ID, model="bym2", graph="W.adj", scale.model = TRUE, constr = TRUE, 
+               # priors
+               hyper = list(theta1 = list("PCprior", c(1, 0.01)),  # Pr(sd<1) = 0.01, unlikely to have rr>3just based on the spatial confounding
+                            theta2 = list("PCprior", c(0.5, 0.5))) # Pr(phi<0.5)=0.5, we state that we believe that the unmeasured spatial confounding
+                                                                   # is driven 50% from the strucutred and 50% from the unstructured random effect
+               )
+
+lung_mod_bym <- inla(formula_bym, data = lung@data, family="poisson",  
+                     control.compute = list(dic = TRUE, waic = TRUE), verbose = F)
+summary(lung_mod_bym)
+```
+We can check the DIC (Deviance information criterion) to examine which model performs better. It seems that the model with the bym prior performs slightly better compared to the model with just an overdispersion parameter:
+```{r }
+lung_mod_ov$dic$dic; lung_mod_bym$dic$dic 
+```
+
+Now we can replot the prior posterior plots and examine the hyperparameters:
+```{r }
+# lets check the hyperparameters
+
+tmp_3 <- inla.tmarginal(function(x) exp(-1/2*x), lung_mod_bym$internal.marginals.hyperpar$`Log precision for ID`) 
+
+plot(tmp_3, type = "l", xlim = c(0,.3), main = "Prior-posterior", xlab = expression(sigma))
+lines(tmp_2, lty=1, lwd=1, col = "blue")
+grid()
+legend("topleft", lty = 1, legend = c("prior", "posterior"), col = c("blue", "black"))
+
+# and the mixing parameter
+
+Q = INLA:::inla.pc.bym.Q("W.adj")
+dim(Q);n <- 150
+Q = INLA:::inla.scale.model(Q,  constr=list(A=matrix(1, 1, n), e=0))
+
+phi.u = 0.5
+phi.alpha = 0.5 ## prob(phi < phi.u) = phi.alpha
+
+phis = 1/(1+exp(-seq(-8, 8,  len = 10000)))
+phi.prior = INLA:::inla.pc.bym.phi(Q=Q, u= phi.u, alpha = phi.alpha)
+
+m.r = inla.smarginal(lung_mod_bym$internal.marginals.hyperpar$`Logit phi for ID`, factor = 100, extrapolate = 0.5)
+
+mm.r = inla.tmarginal(function(x)1/(1+exp(-x)), m.r)
+plot(mm.r, type="l", lwd = 1,
+     xlim = c(0, 1),
+     ylim = c(0, 12),
+     xlab = expression(phi), 
+     main = "Prior-posterior")
+
+lines(phis, exp(phi.prior(phis)), lwd = 1,  lty=1, col = "blue")
+grid()
+```
+
+How would you interpret these prior posterior plots? Can you tell which random effect (the spatially strucutred or the unstructured) contributes more to the latent field?
+
+We can also plot the latent field (or unknown spatial confounding) on the map:
+```{r }
+lung$randef_unadj <- lung_mod_bym$summary.random$ID$`0.5quant`[1:150]
+spplot(lung, c("randef_unadj"), col = "transparent", main = "Spatial variation") # which seems fairly similar with the previous one
+
+
+# we can also plot maps of the relative risk
+lung$RR <- exp(lung_mod_bym$summary.random$ID$`0.5quant`[1:150])
+spplot(lung, "RR", col = "transparent") 
+```
+
+However these maps show only point estimates, without any variation component. To get an idea about the variation on the map we can use the notion of exceedance probability. Exceedance probability is defined as $\Pr(\text{RR}_i>\alpha)$ and this $\alpha$ can be set to anything make sense for each specific application. In our case we consider $\alpha = 1.5$ meaning we are looking for the probability that the RR of the $i$-th region is larger than 1.5 (compared to the overall risk over the domain).
+
+```{r }
+threshold <- log(1.5)
+exceed.prob <- lapply(X= lung_mod_bym$marginals.random$ID[1:150], FUN = function(x) inla.pmarginal(marginal = x, threshold))
+exceed.prob <- 1 - unlist(exceed.prob)
+
+# with the corresponding plot
+lung$exprob <- exceed.prob
+spplot(lung, "exprob", main = "Pr[RR>1.5]")
+```
+
+
+# Ecological regression of lung cancer
+
+We will perform ecological regression to examine the association between lung cancer incidence and deprivation. First we will have a look at the deprivation map in the UK.
+
+```{r }
+spplot(lung, "pctDeprived", col = "transparent", main = "Deprivation")
+```
+
+To perform ecological regression, we just need to add the variable of interest, which in our case is the deprivation, in the formula and re-run the inla command. The mathematical formula writes:
+
+$$\text{log}Y_i = \beta_0 + \beta_1\text{deprivation} + \frac{1}{\sqrt{\tau}}(\sqrt{1-\phi}v_i + \sqrt{\phi}u_i^*)$$
+and the inla command:
+```{r }
+formula_bym_cov <- cases ~ 1 + offset(logExpected) + pctDeprived +
+               f(ID, model="bym2", graph="W.adj", scale.model = TRUE, constr = TRUE, 
+               # priors
+               hyper = list(theta1 = list("PCprior", c(1, 0.01)),  # exactly as before
+                            theta2 = list("PCprior", c(0.5, 0.5)))
+               )
+
+
+lung_mod_bym_cov <- inla(formula_bym_cov, data = lung@data, family="poisson",  
+                     # priors for the fixed effects (not needed but here it is if needed)
+                     control.fixed = list(mean=list(pctDeprived = 0), 
+                                              prec = list(pctDeprived =.0001)),
+                     control.compute = list(dic = TRUE, waic = TRUE), verbose = F)
+
+summary(lung_mod_bym_cov)
+exp(lung_mod_bym_cov$summary.fixed["pctDeprived",c("0.025quant", "0.5quant", "0.975quant")])
+
+```
+
+What can you tell us about the output? Is there an association between deprivation and smoking? What else can we do?
+
+Now we can plot the residual spatial variation, after having adjusted for deprivation.
+
+```{r }
+lung$ranef_adj <- lung_mod_bym_cov$summary.random$ID$`0.5quant`[1:150]
+# and plot the together to see the effect of deprivation
+
+spplot(lung, c("randef_unadj","ranef_adj"), col = "transparent")
+```
+
+we observe a shrinkage to 0, since some observed spatial variation is now explained by deprivation, however there seem to be still spatial confounding, mainly driven by the spatially structured component (possibly because we miss two major lung cancer risk factors, ie smoking and radon). We can also quantify the percentage of the observed spatial variation explained by deprivation.
+
+```{r}
+# sd before adjusting for deprivation
+sd_before <- 1/lung_mod_bym$summary.hyperpar$`0.5quant`[1]
+
+# sd after adjusting for deprivation
+sd_after <- 1/lung_mod_bym_cov$summary.hyperpar$`0.5quant`[1]
+(sd_before -  sd_after)/sd_before
+```
+
+We found that almost 62% of the observed spatial variation can be explained by deprivation. Is this surprising given that the main risk factors are smoking and radon exposure?
+
+\vspace{5pt}
