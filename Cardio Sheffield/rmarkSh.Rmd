@@ -1,47 +1,116 @@
 ---
-title: "Shefield"
-author: "GK"
-date: "17 September 2018"
-output: html_document
+title: "Ecological regression with BYM2 in R/INLA: A case study with stroke mortality in Sheffield"
+author: "Garyfallos Konstantinoudis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: biblio.bib
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-library(maptools)
-library(spdep)
-library(INLA)
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1.title {
+  font-size: 30px;
+  color: black;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+    font-size: 25px;
+  color: black;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+    font-size: 20px;
+  color: black;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+    font-size: 15px;
+  color: black;
+  font-weight: bold;
+}
+code.r{ /* Code block */
+    font-size: 14px;
+}
+pre, code {
+    color: 	#1B0F0E;
+  }
+</style>
 
+
+\pagenumbering{gobble} 
+\pagenumbering{arabic} 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, eval = TRUE, fig.align = "center")
 ```
 
 ## Stroke mortality in Sheffield
 
-In this practical you will work with the Sheffield dataset (also included in the "Spatial and Spatio-Temporal Bayesian Models with R-INLA book used in Chapter 5"). The dataset included information about stroke mortality in Sheffield (counts of deaths), population at risk and relevant covariates (NOx concentration, and Townsend index, which is a deprivation index). In the folder provided there is also a shapefile with the enumeration districts for the city of Sheffield. 
+In this document we will perform ecological regression using `R-INLA` [@rue2009approximate]. We will BYM2 [@riebler2016], a reparametrization of [@besag1991] to stroke mortality in Sheffield examing the effect of NO$_x$ after adjusting for deprivation. The dataset includes information about stroke mortality in Sheffield (counts of deaths), population at risk and relevant covariates (NOx concentration, and Townsend index, which is a deprivation index). In the folder there is also a shapefile with the enumeration districts for the city of Sheffield. You can download the data from [github](https://github.com/gkonstantinoudis/INLA-mapping/tree/master/Cardio%20Sheffield). 
 
+## Install and load packages 
 
-## Importing/cleaning data
+This practical requires the following packages to be installed and attached: `sf`, `spdep`, `dplyr`,`ggplot2`, `patchwork`, `kableExtra` and `INLA`.
 
-```{r}
-setwd("G:/Back up 03.04.2018/PhD/lectures/181030_INLA_ZH/Cardio Sheffield/")
-stroke <- read.csv("Stroke.csv")
+* To install the entire suite of packages, we can use:
+```{r eval = FALSE,  results="hide"}
+install.packages(c("sf", "spdep", "ggplot2", "patchwork"), dependencies = TRUE, 
+                 repos = "http://cran.r-project.org")
+```
 
-head(stroke)
-plot(stroke$stroke_exp)
-table(stroke$Townsend.class)
-table(stroke$NOx.class)
+* For `INLA`, you can use 
+```{r eval = FALSE,  results="hide"}
+install.packages("INLA",repos=c(getOption("repos"),
+                                INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+```
+
+* Then, load the needed packages:
+```{r eval = TRUE, results="hide", message=FALSE, warning=FALSE}
+
+library(sf)
+library(spdep)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(kableExtra) 
+library(INLA)
 
 ```
 
-The dataset has 9 columns. The SP_ID gives us information about the ID of the enumeration districts, the columns stroke_exo and pop give infomation about the expected number of deaths and the population at risk at the ith spatial unit. Information on counts of stroke are given by the variable y. Covariate information (in quintiles) is given in the columns Townsend.class (deprivation) and NOx.class (air pollutant used to capture mainly traffic related air pollution). Townsend and NOx give the categories of the class of this covariates and the offset is defined as $\text{offset}_i = \text{logit}_i(E_i/\text{Pop}_i)$.
+## Importing/cleaning data
 
-Now lets have a look at the enumeration districts of Sheffield. Please notice that the number of rows in the shapefile is the same as the number of rows in our dataset.
-
+* Import data
 ```{r}
+stroke <- read.csv("Stroke.csv")
+stroke$index <- 1:nrow(stroke)
+head(stroke)
+```
 
-library(maptools)
-sheffield.gen <- readShapePoly("Sheffield.shp")
-plot(sheffield.gen)
-nrow(stroke)
+* Check data
+```{r fig.width = 5, fig.height = 3}
+ggplot() + geom_point(data = stroke, aes(x = index, y = stroke_exp), size = 0.5) + 
+  theme_bw() + ylab("expected")
 
+table(stroke$Townsend.class)
+table(stroke$NOx.class)
+```
+
+
+The dataset has 9 columns. The SP_ID gives us information about the ID of the enumeration districts, the columns stroke_exp and pop give infomation about the expected number of deaths and the population at risk at the i-th spatial unit. Information on counts of stroke are given by the variable y. Covariate information (in quintiles) is given in the columns Townsend.class (deprivation) and NOx.class (air pollutant used to capture mainly traffic related air pollution). Townsend and NOx give the categories of the class of this covariates and the offset is defined as $\text{offset}_i = \text{logit}_i(E_i/\text{Pop}_i)$.
+
+* Now lets have a look at the enumeration districts of Sheffield. Please notice that the number of rows in the shapefile is the same as the number of rows in our dataset.
+```{r}
+sheffield.gen <- read_sf("Sheffield.shp")
+```
+
+*and plot it
+```{r fig.width = 4}
+ggplot() + geom_sf(data = sheffield.gen, fill = NA) + theme_bw()
 ```
 
 The research question of this particular problem is to examine the spatial distribution of deaths by stroke in Sheffield and examine to which extent this distribution can be explained by variables as traffic-related air pollution and deprivation. We are also interested in examining the ecological association between these covariates and stroke mortality. To answer these questions we will perform disease mapping and ecological regression with INLA. We will use the binomial distribution rather the Poisson one for this example, since stroke is not a rare outcome:
@@ -51,14 +120,14 @@ $$y_i \sim \text{Binomial}(p_i, n_i)\\
 u_{i}|\mathbf{u}_{-i} \sim \mathcal{N}\Big(\frac{\sum_{j=1}^Nw_{ij}u_j}{\sum_{j = 1}^{N}w_{ij}}, \frac{1}{\tau_1\sum_{j=1}^{N}w_{ij}}\Big) \\[5pt]
 				v_i \sim \mathcal{N}(0, \tau_2^{-1}) \\$$
 
-as before we considered the reparametrization of Simpson, however by typing model = "bym" you fit exactly the above model.
+as before we considered the reparametrization of Simpson [@riebler2016], however by typing model = "bym" you fit exactly the above model.
 ```{r}
 # define the neighbour structure
 W.nb <- poly2nb(sheffield.gen)
 nb2INLA("W.adj", W.nb)
 
 # match
-stroke<- stroke[match(sheffield.gen$SP_ID,stroke$SP_ID),]
+stroke <- stroke[match(sheffield.gen$SP_ID,stroke$SP_ID),]
 #Check for the first 10 areas
 stroke$SP_ID[1:10]
 sheffield.gen$SP_ID[1:10]
@@ -67,68 +136,101 @@ sheffield.gen$SP_ID[1:10]
 stroke$ID<- seq(1,1030)
 
 ```
+
 ## Disease mapping stroke mortality
 
-Here we will fit a BYM model without covariates
-
+* Fit a BYM2 model without covariates
 ```{r message=FALSE, warning=FALSE}
 
 formula <- y ~ 1 + f(ID, model="bym2", graph="W.adj", scale.model = TRUE, constr = TRUE, 
                # priors
                hyper = list(theta1 = list("PCprior", c(1, 0.01)),  
-                            # Pr(sd<1) = 0.01, unlikely to have rr>3just based on the spatial confounding
+               # Pr(sd<1) = 0.01, unlikely to have rr>3just based on the spatial confounding
                             theta2 = list("PCprior", c(0.5, 0.5))) 
-                            # Pr(phi<0.5)=0.5, we state that we believe that the unmeasured spatial confounding
-                            # is driven 50% from the strucutred and 50% from the unstructured random effect
+                # Pr(phi<0.5)=0.5, we believe that the unmeasured spatial confounding
+                # is driven 50% from the strucutred and 50% from the unstructured random effect
                )
+
 
 strokes_DM <- inla(formula, data = stroke, family="binomial",  offset=Offset, Ntrials=pop,
                    control.compute = list(dic = TRUE, waic = TRUE), verbose = F)
 
-strokes_DM$summary.hyperpar
-# tranform to get the standard deviation
-
-sd <- inla.tmarginal(function(x) exp(-1/2*x), strokes_DM$internal.marginals.hyperpar$`Log precision for ID`)
-
-plot(sd, type = "l", xlim = c(0, 1))
-plot(strokes_DM$marginals.hyperpar$`Phi for ID`, type = "l")
-
 ```
 
-How would you interpret these plots?
+* Extract results of hyperparameters
+```{r}
+strokes_DM$summary.hyperpar
+```
 
-```{r message=FALSE, warning=FALSE}
+* Tranform to get the standard deviation
+```{r}
+sd_mar <- as.data.frame(inla.tmarginal(function(x) exp(-1/2*x), 
+                        strokes_DM$internal.marginals.hyperpar$`Log precision for ID`))
+head(sd_mar)
+```
+
+* and plot the posteriors of the hyperparameters of the spatial field
+```{r fig.height = 4, fig.width = 11}
+ggplot() + geom_line(data = sd_mar, aes(x = x, y = y)) + theme_bw() + 
+  ggtitle("Posterior of sd of the spatial field") -> p1
+
+ggplot() + geom_line(data = as.data.frame(strokes_DM$marginals.hyperpar$`Phi for ID`), 
+                     aes(x = x, y = y)) + theme_bw() + 
+  ggtitle("Posterior of sd of the mixing parameter") -> p2
+
+p1|p2
+```
+
+There seems to be variation in the field captured by the BYM2 prior, nevertheless the mixing parameter is very small, implying that most variation is an attribute to the unstructured spatial components. In other words, the field is dominated by overdispersion rather than spatial autocorelation. 
+
+* Plot the spatial random effect
+```{r fig.width = 5}
 sheffield.gen$sp <- strokes_DM$summary.random$ID$`0.5quant`[1:1030]
-spplot(sheffield.gen, "sp", col = "transparent")
+ggplot() + geom_sf(data = sheffield.gen, aes(fill = sp), col = NA) + theme_bw() +
+  scale_fill_viridis_c()
+```
 
-# calculate also exceedance probability
+* Calculate posterior probability that the field is larger than 0
+```{r}
 threshold <- log(1)
 exceed.prob <- lapply(X= strokes_DM$marginals.random$ID[1:1030], FUN = function(x) inla.pmarginal(marginal = x, threshold))
 exceed.prob <- 1 - unlist(exceed.prob)
-boxplot(exceed.prob)
-abline(h = 0.95, col = "red")
+```
 
+* Plots  of the posterior probability
+```{r fig.height = 6, fig.width = 11}
+ggplot() + geom_boxplot(data=as.data.frame(exceed.prob), aes(y = exceed.prob)) + 
+  geom_hline(yintercept = 0.95, col = "red") + theme_bw() + xlim(c(-0.6,0.6)) + 
+  ylab("") + 
+  theme(axis.text.x = element_blank()) -> p1
+
+  
 sheffield.gen$ex <- exceed.prob
 temp.ex <-  sheffield.gen[sheffield.gen$ex >=0.95,]
 
-library(latticeExtra)
-# http://www.stat.columbia.edu/~tzheng/files/Rcolor.pdf
-spplot(sheffield.gen, "ex", col = "transparent", col.regions = colorRampPalette(c('white', "seagreen"))(16)) + layer(sp.polygons(temp.ex, col="red", lwd = 2)) 
+ggplot() + geom_sf(data = sheffield.gen, aes(fill = ex), col = NA) + scale_fill_viridis_c() + 
+  geom_sf(data = temp.ex, col = "red", fill = NA) + theme_bw() -> p2
+
+(p1|p2) + plot_annotation(title = "Posterior probability") 
 
 ```
 
-At this point and based on Occam's razor  grounds it would make sense to fit a model with just an ustructured random effect and compare the models. 
 
+
+* At this point and based on Occam's razor  grounds it would make sense to fit a model with just an ustructured random effect and compare the models. 
 ```{r}
-formula_2 <- y ~ 1 +  f(ID, model="iid", constr = TRUE, hyper = list(theta = list("PCprior", c(1, 0.01))))
+formula_2 <- y ~ 1 +  f(ID, model="iid", constr = TRUE, 
+                        hyper = list(theta = list("PCprior", c(1, 0.01))))
                         
-strokes_DM_unstr <- inla(formula_2, data = stroke, family="binomial",  offset=Offset, Ntrials=pop,
+strokes_DM_unstr <- inla(formula_2, data = stroke, 
+                         family="binomial",  offset=Offset, Ntrials=pop,
                    control.compute = list(dic = TRUE, waic = TRUE), verbose = F)
 
 strokes_DM$dic$dic; strokes_DM_unstr$dic$dic
 
-# it seems that the models without a spatial component performs better.
 ```
+
+It seems that the models without a spatial component performs better.
 
 ## Ecological regression stroke mortality
 
@@ -140,21 +242,22 @@ u_{i}|\mathbf{u}_{-i} \sim \mathcal{N}\Big(\frac{\sum_{j=1}^Nw_{ij}u_j}{\sum_{j 
 				v_i \sim \mathcal{N}(0, \tau_2^{-1}) \\
 				\beta_1, \beta_2 \sim \mathcal{N}(0, 0.5)$$
 				
-Lets first plot them
+* First lets plot them:
+```{r fig.height = 6, fig.width = 11}
+stroke <- left_join(sheffield.gen, stroke, by = c("SP_ID" = "SP_ID"))
 
-```{r}
-sheffield.gen$NOx <- stroke$NOx.class
-spplot(sheffield.gen, "NOx", col = "transparent", main = "NOx Class")
+ggplot() + geom_sf(data = stroke, aes(fill = NOx), col = NA) + scale_fill_viridis_c() + 
+  theme_bw() -> p1
 
-sheffield.gen$depr <- stroke$Townsend.class
-spplot(sheffield.gen, "depr", main = "Townsend Class")
+ggplot() + geom_sf(data = stroke, aes(fill = Townsend), col = NA) + scale_fill_viridis_c() + 
+  theme_bw() -> p2
 
+p1|p2
 ```
 
 What do you observe?
 
-Now we will perform ecological regression.
-
+* Perform ecological regression.
 ```{r message=FALSE, warning=FALSE}
 formula_eco <- y ~  1 + Townsend + NOx + 
                f(ID, model="bym2", graph="W.adj", scale.model = TRUE, constr = TRUE, 
@@ -163,25 +266,36 @@ formula_eco <- y ~  1 + Townsend + NOx +
                             theta2 = list("PCprior", c(0.5, 0.5))) 
                )
 
-model_eco <- inla(formula_eco, family="binomial", data=stroke, offset=Offset, Ntrials=pop, control.compute = list(dic = TRUE, waic = TRUE), control.fixed=list(prec=list(mean=0, prec=0.5)))
-
-# odds ratio
-exp(model_eco$summary.fixed[c("Townsend", "NOx"),c("0.025quant", "0.5quant", "0.975quant")])
-
+model_eco <- inla(formula_eco, family="binomial", data=stroke, offset=Offset, Ntrials=pop, 
+                  control.compute = list(dic = TRUE, waic = TRUE), 
+                  control.fixed=list(prec=list(mean=0, prec=0.5)))
 ```
 
-Now lets check the residual spatial variation
+* Extract the odds ratios.
+```{r }
+tab <- exp(model_eco$summary.fixed[c("Townsend", "NOx"),c("0.5quant", "0.025quant", "0.975quant")])
+tab <- round(tab, digits = 2)
 
-```{r}
-plot(model_eco$marginals.hyperpar$`Phi for ID`, type = "l", main = "mixing parameter")
+kableExtra::kable(tab, caption = "Median and 95%CrI for the odd ratio for NOx and deprivation") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
 ```
 
-almost the entire amount of variation is due to the ustructured random effect. 
+* Check the mixing parameter.
+```{r fig.width = 4, fig.height = 3}
+ggplot() + geom_line(data = as.data.frame(model_eco$marginals.hyperpar$`Phi for ID`), 
+                     aes(x = x, y = y)) + theme_bw() + 
+  ggtitle("Posterior of sd of the mixing parameter") 
+```
 
-```{r}
+now almost the entire amount of variation is due to the ustructured random effect. 
+
+* Check the spatial field.
+```{r fig.width = 5}
 sheffield.gen$sp_eco <- model_eco$summary.random$ID$`0.5quant`[1:1030]
-spplot(sheffield.gen, "sp_eco", col = "transparent")
+ggplot() + geom_sf(data = sheffield.gen, aes(fill = sp_eco), col = NA) + theme_bw() + 
+  scale_fill_viridis_c()
 ```
 
 not much of variation was explained by the covariates. 
 
+## References
