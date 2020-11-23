@@ -1,5 +1,5 @@
 ---
-title: "Ecological regression with BYM2 in R/INLA: A case study with stroke mortality in Sheffield"
+title: "Ecological regression with BYM2 in R-INLA: A case study with stroke mortality in Sheffield"
 author: "Garyfallos Konstantinoudis"
 output:
   html_document:
@@ -51,7 +51,7 @@ knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, eval = TRUE, fi
 
 ## Stroke mortality in Sheffield
 
-In this document we will perform ecological regression using `R-INLA` [@rue2009approximate]. We will BYM2 [@riebler2016], a reparametrization of [@besag1991] to stroke mortality in Sheffield examing the effect of NO$_x$ after adjusting for deprivation. The dataset includes information about stroke mortality in Sheffield (counts of deaths), population at risk and relevant covariates (NOx concentration, and Townsend index, which is a deprivation index). In the folder there is also a shapefile with the enumeration districts for the city of Sheffield. You can download the data from [github](https://github.com/gkonstantinoudis/INLA-mapping/tree/master/Cardio%20Sheffield). 
+In this document we will perform ecological regression using `R-INLA` [@rue2009approximate]. We will BYM2 [@riebler2016], a reparametrization of [@besag1991] to stroke mortality in Sheffield examining the effect of NO$_x$ after adjusting for deprivation. The dataset includes information about stroke mortality in Sheffield (counts of deaths), population at risk and relevant covariates (NOx concentration, and Townsend index, which is a deprivation index). In the folder there is also a shapefile with the enumeration districts for the city of Sheffield. You can download the data from [github](https://github.com/gkonstantinoudis/INLA-mapping/tree/master/Cardio%20Sheffield). 
 
 ## Install and load packages 
 
